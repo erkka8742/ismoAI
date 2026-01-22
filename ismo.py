@@ -54,7 +54,6 @@ system_prompt = system_prompt + "\n" + ", ".join(voice_lines)
 
 
 def clean_text(text):
-    # Remove "vastaus:" prefix if present
     if "vastaus:" in text.lower():
         text = text.lower().split("vastaus:")[-1]
     return text.replace("'", "").replace('"', "").replace(".", "").replace(",", "").strip().lower()
@@ -96,7 +95,6 @@ def askIsmo(prompt):
         play_voice_line(response)
     else:
         print(f"❌ '{response}' not found in voice_lines.")
-
 
 
 
