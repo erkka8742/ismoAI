@@ -6,6 +6,7 @@ import speech_recognition as sr
 from faster_whisper import WhisperModel
 from groq import Groq
 from dotenv import load_dotenv
+from cerebras.cloud.sdk import Cerebras
 
 load_dotenv()
 
@@ -34,13 +35,13 @@ except Exception as e:
 print("Listening...")
 
 recognizer = sr.Recognizer()
-recognizer.pause_threshold = 1.5 
-recognizer.energy_threshold = 300
+recognizer.pause_threshold = 1.1
+recognizer.energy_threshold = 200
 recognizer.dynamic_energy_threshold = True
 
 
-client = Groq(
-    api_key=os.environ.get("GROQ_API_KEY"),
+client = Cerebras(
+    api_key=os.environ.get("API_KEY"),
 )
 
 # Load base prompt
@@ -50,13 +51,13 @@ with open("prompt.txt", "r", encoding="utf-8") as f:
 # Load voice line names
 voice_lines = [f[:-4] for f in os.listdir("voice_lines") if f.endswith(".wav")]
 
-system_prompt = system_prompt + "\n" + ", ".join(voice_lines)
+system_prompt = system_prompt + "\n" + ", ".join([f"{i+1}. {line}" for i, line in enumerate(voice_lines)])
 
 
 def clean_text(text):
-    if "vastaus:" in text.lower():
-        text = text.lower().split("vastaus:")[-1]
-    return text.replace("'", "").replace('"', "").replace(".", "").replace(",", "").strip().lower()
+    # Extract all numbers from the text
+    matches = re.findall(r'\d+', text)
+    return matches
 
 def play_voice_line(voice_line):
     print(f"Playing voice line: {voice_line}")
@@ -67,38 +68,53 @@ def play_voice_line(voice_line):
     else:
         print(f"❌ Error: Could not find voice line at: {filename}")
 
-def askIsmo(prompt):
-    completion = client.chat.completions.create(
-    model="qwen/qwen3-32b",
-    messages=[
+convoContext = [
       {
         "role": "system",
         "content": system_prompt
       },
-      {
+]
+       
+
+def askIsmo(prompt):
+    convoContext.append({
         "role": "user",
         "content": prompt
-      }
-    ],
-    temperature=1.2,
+    })
+    if len(convoContext) > 10:
+        convoContext.pop(1)
+        convoContext.pop(1)
+    completion = client.chat.completions.create(
+    #model="qwen/qwen3-32b",
+    #model="llama-3.1-8b-instant",
+    model="llama-3.3-70b",
+    messages=convoContext,
+    temperature=1.5,
     max_completion_tokens=1024,
     top_p=1,
     stream=False,
     stop=None,
-    include_reasoning=False,
-    reasoning_effort="none"
+    #reasoning_format="none"
 
     )       
-    response = clean_text(completion.choices[0].message.content.strip())
-    print(f"AI response: '{response}'")
-    if response in voice_lines:
-        play_voice_line(response)
+    numbers = clean_text(completion.choices[0].message.content.strip())
+    print(f"AI response: '{numbers}'")
+    convoContext.append({
+        "role": "assistant",
+        "content": str(numbers)
+    })
+    if numbers:
+        for num in numbers:
+            try:
+                index = int(num) - 1  # Convert to 0-based index
+                if 0 <= index < len(voice_lines):
+                    play_voice_line(voice_lines[index])
+                else:
+                    print(f"❌ Number '{num}' is out of range. Valid numbers: 1-{len(voice_lines)}")
+            except ValueError:
+                print(f"❌ Could not parse number: '{num}'")
     else:
-        print(f"❌ '{response}' not found in voice_lines.")
-
-
-
-
+        print(f"❌ No numbers found in response.")
 
 try:
     with sr.Microphone(sample_rate=16000) as source:
@@ -122,7 +138,7 @@ try:
             
             full_text = "".join([segment.text for segment in segments])
             if full_text.strip():
-                print(f"\rUser: {full_text}")
+                print(f"\r{' ' * 50}\rUser: {full_text}")  # Clear line before printing
                 askIsmo(full_text)
                 
 
