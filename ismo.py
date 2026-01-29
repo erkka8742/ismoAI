@@ -5,6 +5,7 @@ import sys
 import time
 import signal
 import queue
+import random
 import threading
 import asyncio
 import numpy as np
@@ -59,6 +60,21 @@ system_prompt += "\n" + ", ".join([f"{i+1}. {line}" for i, line in enumerate(voi
 
 convoContext = [{"role": "system", "content": system_prompt}]
 
+# Greeting voice lines (played randomly when joining)
+GREETING_FILES = [
+    "voice_lines/miten_voin_palvella.wav",
+    "voice_lines/täältä_tullaan.wav",
+    "voice_lines/tadaa.wav",
+    "voice_lines/täällä_tehdään_työt_niin_kun_mä_haluan.wav",
+    "voice_lines/terve.wav",
+    "voice_lines/toivottavasti_en_ammu_kaksijalkasta.wav",
+    "voice_lines/uh.wav",
+    "voice_lines/viitta_päälle_ja_menoks.wav",
+    "voice_lines/wow.wav",
+    "voice_lines/lallallaa.wav",
+    "voice_lines/katos_katos.wav"
+]
+
 # --- 3. VAD SINK (The Ears) ---
 class VadSink(discord.sinks.Sink):
     """Captures audio, filters silence using WebRTC VAD, and buffers speech."""
@@ -73,10 +89,11 @@ class VadSink(discord.sinks.Sink):
     
     def _monitor_buffers(self):
         """Background thread that flushes buffers if no packets received for a while."""
-        STALE_TIMEOUT = 1.5  # Flush if no packets for 1.5 seconds
+        STALE_TIMEOUT = 1.2  # Flush if no packets for 1.2 seconds
         while self._running:
             time.sleep(0.1)  # Check every 100ms
             current_time = time.time()
+            
             for user_id, state in list(self.user_data.items()):
                 if state['is_speaking'] and len(state['buffer']) > 0:
                     time_since_last = current_time - state['last_packet_time']
@@ -201,8 +218,23 @@ class VadSink(discord.sinks.Sink):
             print(f"[DEBUG] Cleanup error (non-critical): {e}")
 
 # --- 4. WORKER THREADS ---
+ismoTalking = True
+
+async def set_mute_state(muted: bool):
+    """Toggle bot's self-mute state in voice channel."""
+    global current_voice_client
+    if current_voice_client and current_voice_client.is_connected():
+        try:
+            guild = current_voice_client.guild
+            channel = current_voice_client.channel
+            await guild.change_voice_state(channel=channel, self_mute=muted)
+            print(f"[DEBUG] Bot self-mute set to: {muted}")
+        except Exception as e:
+            print(f"[DEBUG] Failed to change mute state: {e}")
+
 def process_audio():
     """Reads completed phrases from queue and sends to Whisper + LLM."""
+    global ismoTalking
     print("[DEBUG] Transcription worker started, waiting for audio...")
     while True:
         raw_bytes = transcription_queue.get()
@@ -238,11 +270,33 @@ def process_audio():
             full_text = "".join([segment.text for segment in segment_list]).strip()
             print(f"[DEBUG] Transcription result: '{full_text}'")
             
+            # Skip common Whisper hallucinations
+            text_clean_check = re.sub(r'[^\w\s]', '', full_text.lower()).strip()
+            if text_clean_check in ["kiitos", "kiitos kiitos"]:
+                print("[DEBUG] Skipping Whisper hallucination")
+                continue
+            
             if full_text:
                 print(f"User: {full_text}")
-                # Only respond if "ismo" is mentioned (wake word)
-                text_lower = full_text.lower()
-                if any(word in text_lower for word in ["ismo", "ismoo", "isma", "ismaa"]):
+                # Remove punctuation for wake word detection
+                text_clean = re.sub(r'[^\w\s]', '', full_text.lower())
+                
+                if any(word in text_clean for word in ["hiljaa"]):
+                    ismoTalking = False
+                    print("[DEBUG] Ismo going quiet")
+                    # Set mute icon on Discord
+                    if bot.loop and bot.loop.is_running():
+                        asyncio.run_coroutine_threadsafe(set_mute_state(True), bot.loop)
+                    askIsmo(full_text)
+                elif any(word in text_clean for word in ["puhutaan"]):
+                    ismoTalking = True
+                    print("[DEBUG] Ismo resuming conversation")
+                    # Remove mute icon on Discord
+                    if bot.loop and bot.loop.is_running():
+                        asyncio.run_coroutine_threadsafe(set_mute_state(False), bot.loop)
+                    askIsmo(full_text)
+                    print("[DEBUG] Processing complete, ready for next input")
+                elif ismoTalking and any(name in text_clean for name in ["ismo", "isma", "ismoo", "ismaa", "osmo", "osmoo"]):
                     askIsmo(full_text)
                     print("[DEBUG] Processing complete, ready for next input")
                 else:
@@ -266,17 +320,28 @@ def askIsmo(prompt):
 
     try:
         completion = client.chat.completions.create(
-            model="llama-3.3-70b",
+            model="zai-glm-4.7",
             messages=convoContext,
-            temperature=1.5,
-            max_completion_tokens=1024,
+            temperature=1.2,
+            #max_completion_tokens=1024,
             top_p=1,
-            stream=False
+            #logprobs=True,
+            disable_reasoning=True,
+            #reasoning_format="hidden"
         )
         
-        response_text = completion.choices[0].message.content.strip()
+        response_text = completion.choices[0].message.content
+        if not response_text:
+            print("[DEBUG] LLM returned empty response")
+            return
+        response_text = response_text.strip()
         numbers = re.findall(r'\d+', response_text)
         print(f"AI response: '{numbers}'")
+        
+        # Discard responses with more than 5 numbers
+        if len(numbers) > 5:
+            print(f"[DEBUG] Discarding response - too many numbers ({len(numbers)})")
+            return
         
         convoContext.append({"role": "assistant", "content": str(numbers)})
 
@@ -352,10 +417,17 @@ async def join(ctx):
             )
             print(f"[DEBUG] Recording started successfully")
             print(f"[DEBUG] Voice client recording: {current_voice_client.recording}")
-            await ctx.respond(f"Joined {channel.name} and listening!")
+            
+            # Play random greeting when joining
+            if GREETING_FILES:
+                greeting_file = random.choice(GREETING_FILES)
+                if os.path.exists(greeting_file):
+                    queue_audio(greeting_file)
+            
+            await ctx.respond("Täältä tullaan", ephemeral=True)
         except Exception as e:
             print(f"Recording error: {e}")
-            await ctx.respond(f"Joined {channel.name} but couldn't start listening: {e}")
+            await ctx.respond(f"Joku meni vikaan", ephemeral=True)
     else:
         await ctx.respond("You need to be in a voice channel.")
 
@@ -366,7 +438,7 @@ async def leave(ctx):
         ctx.voice_client.stop_recording()
         await ctx.voice_client.disconnect()
         current_voice_client = None
-        await ctx.respond("Left channel.")
+        await ctx.respond("Hyvää päivänjatkoa", ephemeral=True)
 
 # Signal handler for clean shutdown
 def signal_handler(sig, frame):
