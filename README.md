@@ -5,6 +5,9 @@ Keskustelu tarvitsee nopean AI inferencen, joten käytössä Cerebras-palvelu.
 LLM valitsee vastaukseen sopivat ääniklipit.
 
 Tarvitsee:
+
 -Discord bot tokenin
+
 -Cerebras API-key
+
 -paikallinen Whisper asennus
